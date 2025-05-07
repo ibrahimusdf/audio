@@ -2,35 +2,27 @@ from flask import Flask, request, send_file, jsonify
 import os, tempfile, requests, textwrap, subprocess
 from dotenv import load_dotenv
 
-# Cargar las variables de entorno desde el archivo .env
 load_dotenv()
-
 app = Flask(__name__)
 
-# Recuperar la clave de API de Hugging Face desde las variables de entorno
-API_KEY = os.getenv("HUGGINGFACE_API_KEY")
-API_URL = "https://router.huggingface.co/fal-ai/fal-ai/dia-tts"  # API de Hugging Face
-
-if not API_KEY:
-    raise ValueError("La clave de API de Hugging Face no está configurada en las variables de entorno")
-
-HEADERS = {
-    "Authorization": f"Bearer {API_KEY}",  # Usar la clave de API cargada desde el entorno
+HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY")  # Asegúrate de que esta variable de entorno esté configurada
+API_URL = "https://router.huggingface.co/fal-ai/fal-ai/dia-tts"
+headers = {
+    "Authorization": f"Bearer {HUGGINGFACE_API_KEY}",
 }
 
 def sintetizar_parte(texto, output_path):
     payload = {
         "text": texto,
     }
-    res = requests.post(API_URL, headers=HEADERS, json=payload)
-
-    if res.status_code == 200:
-        # Extraer el audio binario desde la respuesta
-        audio = res.content
+    response = requests.post(API_URL, headers=headers, json=payload)
+    
+    if response.status_code == 200:
+        audio = response.json().get("audio")
         with open(output_path, "wb") as f:
             f.write(audio)
     else:
-        raise Exception(f"Error HuggingFace: {res.status_code}, {res.text}")
+        raise Exception(f"Error HuggingFace: {response.status_code}, {response.text}")
 
 @app.route("/audio", methods=["POST"])
 def generar_audio():
@@ -39,7 +31,6 @@ def generar_audio():
         return jsonify({"error": "Falta el texto"}), 400
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        # Dividir el texto en fragmentos
         fragmentos = textwrap.wrap(texto, width=2400, break_long_words=False)
         partes = []
 
@@ -53,11 +44,21 @@ def generar_audio():
             for p in partes:
                 f.write(f"file '{p}'\n")
 
-        # Concatenar los archivos de audio en un único archivo
         audio_final = os.path.join(tmpdir, "audio_final.mp3")
-        subprocess.run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", lista, "-c", "copy", audio_final], check=True)
+        try:
+            subprocess.run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", lista, "-c", "copy", audio_final], check=True)
+        except subprocess.CalledProcessError as e:
+            return jsonify({"error": f"Error al procesar audio con ffmpeg: {str(e)}"}), 500
 
         return send_file(audio_final, mimetype="audio/mpeg", as_attachment=True, download_name="audio_final.mp3")
+
+@app.route("/download_lista", methods=["GET"])
+def download_lista():
+    lista_path = '/ruta/donde/esta/lista.txt'  # Ajusta la ruta a donde esté el archivo en tu entorno
+    if os.path.exists(lista_path):
+        return send_file(lista_path, as_attachment=True)
+    else:
+        return jsonify({"error": "Archivo no encontrado"}), 404
 
 @app.route("/health")
 def health():
