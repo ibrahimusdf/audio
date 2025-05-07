@@ -2,12 +2,20 @@ from flask import Flask, request, send_file, jsonify
 import os, tempfile, requests, textwrap, subprocess
 from dotenv import load_dotenv
 
+# Cargar las variables de entorno desde el archivo .env
 load_dotenv()
+
 app = Flask(__name__)
 
+# Recuperar la clave de API de Hugging Face desde las variables de entorno
+API_KEY = os.getenv("HUGGINGFACE_API_KEY")
 API_URL = "https://router.huggingface.co/fal-ai/fal-ai/dia-tts"  # API de Hugging Face
+
+if not API_KEY:
+    raise ValueError("La clave de API de Hugging Face no está configurada en las variables de entorno")
+
 HEADERS = {
-    "Authorization": "Bearer hf_xxxxxxxxxxxxxxxxxxxxxxxx",  # Reemplaza con tu API key
+    "Authorization": f"Bearer {API_KEY}",  # Usar la clave de API cargada desde el entorno
 }
 
 def sintetizar_parte(texto, output_path):
