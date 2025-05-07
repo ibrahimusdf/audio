@@ -8,7 +8,7 @@ app = Flask(__name__)
 HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY")
 
 def sintetizar_parte(texto, output_path):
-    url = "https://api-inference.huggingface.co/models/espnet/kan-bayashi_ljspeech_vits"
+    url = "https://api-inference.huggingface.co/models/tts_models/en/ljspeech/glow-tts"
     headers = {
         "Authorization": f"Bearer {HUGGINGFACE_API_KEY}",
         "Content-Type": "application/json"
