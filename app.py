@@ -5,27 +5,22 @@ from dotenv import load_dotenv
 load_dotenv()
 app = Flask(__name__)
 
-API_KEY = os.getenv("ELEVENLABS_API_KEY")
-VOICE_ID = "21m00Tcm4TlvDq8ikWAM"
+HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY")
 
 def sintetizar_parte(texto, output_path):
-    url = f"https://api.elevenlabs.io/v1/text-to-speech/{VOICE_ID}"
+    url = "https://api-inference.huggingface.co/models/espnet/kan-bayashi_ljspeech_vits"
     headers = {
-        "xi-api-key": API_KEY,
-        "Content-Type": "application/json",
-        "Accept": "audio/mpeg"
+        "Authorization": f"Bearer {HUGGINGFACE_API_KEY}",
+        "Content-Type": "application/json"
     }
-    payload = {
-        "text": texto,
-        "model_id": "eleven_monolingual_v1",
-        "voice_settings": { "stability": 0.7, "similarity_boost": 0.7 }
-    }
+    payload = { "inputs": texto }
+
     res = requests.post(url, json=payload, headers=headers)
     if res.status_code == 200:
         with open(output_path, "wb") as f:
             f.write(res.content)
     else:
-        raise Exception(f"Error: {res.status_code}, {res.text}")
+        raise Exception(f"Error HuggingFace: {res.status_code}, {res.text}")
 
 @app.route("/audio", methods=["POST"])
 def generar_audio():
