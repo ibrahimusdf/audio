@@ -18,9 +18,18 @@ def sintetizar_parte(texto, output_path):
     response = requests.post(API_URL, headers=headers, json=payload)
     
     if response.status_code == 200:
-        audio = response.json().get("audio")
-        with open(output_path, "wb") as f:
-            f.write(audio)
+        response_data = response.json()
+        # Verifica el contenido de la respuesta
+        print(response_data)  # Para depurar y ver cómo viene la respuesta
+
+        # Extraemos el audio en formato binario
+        audio = response_data.get("audio")
+        
+        if audio:
+            with open(output_path, "wb") as f:
+                f.write(audio)  # Escribe los bytes en el archivo
+        else:
+            raise Exception(f"Audio no encontrado en la respuesta: {response_data}")
     else:
         raise Exception(f"Error HuggingFace: {response.status_code}, {response.text}")
 
