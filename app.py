@@ -1,39 +1,37 @@
+from flask import Flask, request, send_file, jsonify
 import os
 import tempfile
-import requests
 import textwrap
+import requests
 import subprocess
-from flask import Flask, request, send_file, jsonify
 from dotenv import load_dotenv
 
 load_dotenv()
 
 app = Flask(__name__)
-
-# Recuperar la clave de API de Hugging Face desde las variables de entorno
-API_KEY = os.getenv("HUGGINGFACE_API_KEY")
-API_URL = "https://router.huggingface.co/fal-ai/fal-ai/dia-tts"
-
-if not API_KEY:
-    raise ValueError("La clave de API de Hugging Face no está configurada en las variables de entorno")
-
-HEADERS = {
-    "Authorization": f"Bearer {API_KEY}",
-}
+ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
+VOICE_ID = "EXAVITQu4vr4xnSDxMaL"  # Puedes cambiarlo por otro si quieres
 
 def sintetizar_parte(texto, output_path):
-    payload = {
-        "text": texto,
+    url = f"https://api.elevenlabs.io/v1/text-to-speech/{VOICE_ID}"
+    headers = {
+        "xi-api-key": ELEVENLABS_API_KEY,
+        "Content-Type": "application/json"
     }
-    res = requests.post(API_URL, headers=HEADERS, json=payload)
+    data = {
+        "text": texto,
+        "voice_settings": {
+            "stability": 0.5,
+            "similarity_boost": 0.5
+        }
+    }
 
-    if res.status_code == 200:
-        # Extraer el audio binario desde la respuesta
-        audio = res.content
+    response = requests.post(url, json=data, headers=headers)
+    if response.status_code == 200:
         with open(output_path, "wb") as f:
-            f.write(audio)
+            f.write(response.content)
     else:
-        raise Exception(f"Error HuggingFace: {res.status_code}, {res.text}")
+        raise Exception(f"Error ElevenLabs: {response.status_code}, {response.text}")
 
 @app.route("/audio", methods=["POST"])
 def generar_audio():
@@ -42,33 +40,24 @@ def generar_audio():
         return jsonify({"error": "Falta el texto"}), 400
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        # Dividir el texto en fragmentos
-        fragmentos = textwrap.wrap(texto, width=2400, break_long_words=False)
+        fragmentos = textwrap.wrap(texto, width=2500, break_long_words=False)
         partes = []
 
-        # Generar archivos MP3 para cada fragmento
         for i, parte in enumerate(fragmentos):
-            out = os.path.join(tmpdir, f"parte_{i}.mp3")
-            sintetizar_parte(parte, out)
-            partes.append(out)
+            out_path = os.path.join(tmpdir, f"parte_{i}.mp3")
+            sintetizar_parte(parte, out_path)
+            partes.append(out_path)
 
-        # Crear archivo lista.txt para ffmpeg
-        lista = os.path.join(tmpdir, "lista.txt")
-        with open(lista, "w") as f:
+        lista_txt = os.path.join(tmpdir, "lista.txt")
+        with open(lista_txt, "w") as f:
             for p in partes:
                 f.write(f"file '{p}'\n")
 
-        # Verificar que la lista se ha generado correctamente
-        with open(lista, 'r') as f:
-            print("Contenido de lista.txt:")
-            print(f.read())  # Imprimir contenido de lista.txt para depuración
-
-        # Intentar concatenar los archivos con ffmpeg
         audio_final = os.path.join(tmpdir, "audio_final.mp3")
         try:
-            subprocess.run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", lista, "-c", "copy", audio_final], check=True)
+            subprocess.run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", lista_txt, "-c", "copy", audio_final], check=True)
         except subprocess.CalledProcessError as e:
-            return jsonify({"error": "Error al concatenar los archivos de audio", "details": str(e)}), 500
+            return jsonify({"error": "Error al unir audios con ffmpeg", "details": str(e)}), 500
 
         return send_file(audio_final, mimetype="audio/mpeg", as_attachment=True, download_name="audio_final.mp3")
 
@@ -77,4 +66,4 @@ def health():
     return jsonify({"status": "ok"})
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    app.run(debug=True)
