@@ -1,37 +1,39 @@
+import os
+import tempfile
+import requests
+import textwrap
+import subprocess
 from flask import Flask, request, send_file, jsonify
-import os, tempfile, requests, textwrap, subprocess
 from dotenv import load_dotenv
 
 load_dotenv()
+
 app = Flask(__name__)
 
-HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY")  # Asegúrate de que esta variable de entorno esté configurada
+# Recuperar la clave de API de Hugging Face desde las variables de entorno
+API_KEY = os.getenv("HUGGINGFACE_API_KEY")
 API_URL = "https://router.huggingface.co/fal-ai/fal-ai/dia-tts"
-headers = {
-    "Authorization": f"Bearer {HUGGINGFACE_API_KEY}",
+
+if not API_KEY:
+    raise ValueError("La clave de API de Hugging Face no está configurada en las variables de entorno")
+
+HEADERS = {
+    "Authorization": f"Bearer {API_KEY}",
 }
 
 def sintetizar_parte(texto, output_path):
     payload = {
         "text": texto,
     }
-    response = requests.post(API_URL, headers=headers, json=payload)
-    
-    if response.status_code == 200:
-        response_data = response.json()
-        # Verifica el contenido de la respuesta
-        print(response_data)  # Para depurar y ver cómo viene la respuesta
+    res = requests.post(API_URL, headers=HEADERS, json=payload)
 
-        # Extraemos el audio en formato binario
-        audio = response_data.get("audio")
-        
-        if audio:
-            with open(output_path, "wb") as f:
-                f.write(audio)  # Escribe los bytes en el archivo
-        else:
-            raise Exception(f"Audio no encontrado en la respuesta: {response_data}")
+    if res.status_code == 200:
+        # Extraer el audio binario desde la respuesta
+        audio = res.content
+        with open(output_path, "wb") as f:
+            f.write(audio)
     else:
-        raise Exception(f"Error HuggingFace: {response.status_code}, {response.text}")
+        raise Exception(f"Error HuggingFace: {res.status_code}, {res.text}")
 
 @app.route("/audio", methods=["POST"])
 def generar_audio():
@@ -40,34 +42,35 @@ def generar_audio():
         return jsonify({"error": "Falta el texto"}), 400
 
     with tempfile.TemporaryDirectory() as tmpdir:
+        # Dividir el texto en fragmentos
         fragmentos = textwrap.wrap(texto, width=2400, break_long_words=False)
         partes = []
 
+        # Generar archivos MP3 para cada fragmento
         for i, parte in enumerate(fragmentos):
             out = os.path.join(tmpdir, f"parte_{i}.mp3")
             sintetizar_parte(parte, out)
             partes.append(out)
 
+        # Crear archivo lista.txt para ffmpeg
         lista = os.path.join(tmpdir, "lista.txt")
         with open(lista, "w") as f:
             for p in partes:
                 f.write(f"file '{p}'\n")
 
+        # Verificar que la lista se ha generado correctamente
+        with open(lista, 'r') as f:
+            print("Contenido de lista.txt:")
+            print(f.read())  # Imprimir contenido de lista.txt para depuración
+
+        # Intentar concatenar los archivos con ffmpeg
         audio_final = os.path.join(tmpdir, "audio_final.mp3")
         try:
             subprocess.run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", lista, "-c", "copy", audio_final], check=True)
         except subprocess.CalledProcessError as e:
-            return jsonify({"error": f"Error al procesar audio con ffmpeg: {str(e)}"}), 500
+            return jsonify({"error": "Error al concatenar los archivos de audio", "details": str(e)}), 500
 
         return send_file(audio_final, mimetype="audio/mpeg", as_attachment=True, download_name="audio_final.mp3")
-
-@app.route("/download_lista", methods=["GET"])
-def download_lista():
-    lista_path = '/ruta/donde/esta/lista.txt'  # Ajusta la ruta a donde esté el archivo en tu entorno
-    if os.path.exists(lista_path):
-        return send_file(lista_path, as_attachment=True)
-    else:
-        return jsonify({"error": "Archivo no encontrado"}), 404
 
 @app.route("/health")
 def health():
