@@ -1,28 +1,28 @@
 from flask import Flask, request, send_file, jsonify
-import os
-import tempfile
-import requests
+import os, tempfile, requests, textwrap, subprocess
+from dotenv import load_dotenv
 
+load_dotenv()
 app = Flask(__name__)
 
-# Tu clave de API de Hugging Face (asegúrate de poner la correcta)
-API_KEY = os.getenv("HUGGINGFACE_API_KEY")
-API_URL = "https://router.huggingface.co/fal-ai/fal-ai/dia-tts"
-
-headers = {
-    "Authorization": f"Bearer {API_KEY}",
+API_URL = "https://router.huggingface.co/fal-ai/fal-ai/dia-tts"  # API de Hugging Face
+HEADERS = {
+    "Authorization": "Bearer hf_xxxxxxxxxxxxxxxxxxxxxxxx",  # Reemplaza con tu API key
 }
 
 def sintetizar_parte(texto, output_path):
-    payload = {"text": texto}
-    response = requests.post(API_URL, headers=headers, json=payload)
-    
-    if response.status_code == 200:
-        audio = response.json()['audio']
+    payload = {
+        "text": texto,
+    }
+    res = requests.post(API_URL, headers=HEADERS, json=payload)
+
+    if res.status_code == 200:
+        # Extraer el audio binario desde la respuesta
+        audio = res.content
         with open(output_path, "wb") as f:
             f.write(audio)
     else:
-        raise Exception(f"Error HuggingFace: {response.status_code}, {response.text}")
+        raise Exception(f"Error HuggingFace: {res.status_code}, {res.text}")
 
 @app.route("/audio", methods=["POST"])
 def generar_audio():
@@ -31,8 +31,8 @@ def generar_audio():
         return jsonify({"error": "Falta el texto"}), 400
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        # Dividir el texto en fragmentos para no exceder el límite
-        fragmentos = texto.split(".")  # Esto divide por oraciones, puedes ajustarlo más
+        # Dividir el texto en fragmentos
+        fragmentos = textwrap.wrap(texto, width=2400, break_long_words=False)
         partes = []
 
         for i, parte in enumerate(fragmentos):
@@ -40,19 +40,16 @@ def generar_audio():
             sintetizar_parte(parte, out)
             partes.append(out)
 
-        # Aquí juntamos los audios generados en un solo archivo
-        from pydub import AudioSegment
+        lista = os.path.join(tmpdir, "lista.txt")
+        with open(lista, "w") as f:
+            for p in partes:
+                f.write(f"file '{p}'\n")
 
-        audio_final = AudioSegment.empty()
-        for part in partes:
-            audio = AudioSegment.from_mp3(part)
-            audio_final += audio
-        
-        # Guardamos el archivo final
-        output_audio_path = os.path.join(tmpdir, "audio_final.mp3")
-        audio_final.export(output_audio_path, format="mp3")
+        # Concatenar los archivos de audio en un único archivo
+        audio_final = os.path.join(tmpdir, "audio_final.mp3")
+        subprocess.run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", lista, "-c", "copy", audio_final], check=True)
 
-        return send_file(output_audio_path, mimetype="audio/mpeg", as_attachment=True, download_name="audio_final.mp3")
+        return send_file(audio_final, mimetype="audio/mpeg", as_attachment=True, download_name="audio_final.mp3")
 
 @app.route("/health")
 def health():
