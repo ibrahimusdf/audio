@@ -3,128 +3,128 @@ import os
 import tempfile
 import textwrap
 from dotenv import load_dotenv
-from transformers import pipeline, AutoModelForSpeechSeq2Seq, AutoProcessor
+from transformers import VitsModel, AutoTokenizer
 import torch
 from pydub import AudioSegment
 import numpy as np
 from scipy.io.wavfile import write
+import warnings
 
-# Carga variables de entorno (para desarrollo local)
-load_dotenv()  
+# Ignorar warnings específicos de transformers
+warnings.filterwarnings("ignore", category=FutureWarning)
+
+load_dotenv()
 
 app = Flask(__name__)
 
-# ========= CONFIGURACIÓN PRINCIPAL ========= #
-MODEL_NAME = "facebook/fastspeech2-en-ljspeech"  # Modelo compatible con Hugging Face
+# ========= CONFIGURACIÓN ACTUALIZADA ========= #
+MODEL_NAME = "facebook/mms-tts-eng"  # Modelo alternativo compatible
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-MAX_CHUNK_SIZE = 300  # Texto dividido para evitar sobrecarga de memoria
-HF_API_KEY = os.getenv("HF_API_KEY")  # Clave desde variables de entorno
-
-# ========= VERIFICACIÓN INICIAL ========= #
-if not HF_API_KEY:
-    raise RuntimeError("❌ HF_API_KEY no encontrada. Configúrala en Render.")
+MAX_CHUNK_SIZE = 200  # Más pequeño para Render Free Tier
+HF_TOKEN = os.getenv("HF_API_KEY")  # Ahora usamos token en lugar de use_auth_token
 
 # ========= INICIALIZACIÓN DEL MODELO ========= #
+model = None
+tokenizer = None
+
 def load_model():
     try:
-        # Configuración para baja memoria (útil en Render free tier)
-        torch_dtype = torch.float16 if DEVICE == "cuda" else torch.float32
+        global model, tokenizer
         
-        model = AutoModelForSpeechSeq2Seq.from_pretrained(
+        model = VitsModel.from_pretrained(
             MODEL_NAME,
-            torch_dtype=torch_dtype,
-            use_auth_token=HF_API_KEY  # Autenticación con Hugging Face
+            token=HF_TOKEN
         ).to(DEVICE)
         
-        processor = AutoProcessor.from_pretrained(MODEL_NAME, use_auth_token=HF_API_KEY)
+        tokenizer = AutoTokenizer.from_pretrained(
+            MODEL_NAME,
+            token=HF_TOKEN
+        )
         
-        # Congelar modelo para optimizar memoria
+        # Congelar modelo
         model.eval()
         for param in model.parameters():
             param.requires_grad = False
             
-        return pipeline(
-            "text-to-speech",
-            model=model,
-            tokenizer=processor.tokenizer,
-            feature_extractor=processor.feature_extractor,
-            device=DEVICE
-        )
+        return True
     except Exception as e:
-        app.logger.error(f"Error al cargar el modelo: {str(e)}")
-        return None
+        app.logger.error(f"Error loading model: {str(e)}")
+        return False
 
-tts_pipeline = load_model()
+# Cargar modelo al iniciar
+if not load_model():
+    print("❌ No se pudo cargar el modelo. Verifica el token o el nombre del modelo.")
 
-# ========= FUNCIÓN PARA GENERAR AUDIO ========= #
-def generate_audio_chunk(text, output_path):
+# ========= FUNCIÓN DE GENERACIÓN ========= #
+def generate_speech(text, output_path):
     try:
-        if DEVICE == "cuda":
-            torch.cuda.empty_cache()  # Limpiar memoria GPU
+        inputs = tokenizer(text, return_tensors="pt").to(DEVICE)
+        
+        with torch.no_grad():
+            output = model(**inputs).waveform
             
-        # Generar audio
-        output = tts_pipeline(text)
+        # Convertir a formato WAV
+        audio_data = output.cpu().numpy().squeeze()
+        audio_data = (audio_data * 32767).astype(np.int16)
+        write(output_path, model.config.sampling_rate, audio_data)
         
-        # Convertir y guardar como WAV
-        audio_data = (output["audio"] * 32767).astype(np.int16)
-        write(output_path, output["sampling_rate"], audio_data)
-        
+        return True
     except Exception as e:
-        app.logger.error(f"Error en generación de audio: {str(e)}")
-        raise
+        app.logger.error(f"Error generating speech: {str(e)}")
+        return False
 
-# ========= ENDPOINT PRINCIPAL ========= #
-@app.route("/audio", methods=["POST"])
+# ========= ENDPOINTS ========= #
+@app.route("/tts", methods=["POST"])
 def text_to_speech():
-    if tts_pipeline is None:
-        return jsonify({"error": "El servicio TTS no está disponible"}), 503
+    if model is None:
+        return jsonify({"error": "Modelo no disponible"}), 503
         
     if not request.json or "text" not in request.json:
-        return jsonify({"error": "Se requiere el campo 'text'"}), 400
+        return jsonify({"error": "Texto requerido"}), 400
         
     text = request.json["text"]
     
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
-            # Dividir texto en fragmentos
             chunks = textwrap.wrap(text, width=MAX_CHUNK_SIZE)
             audio_files = []
             
             for i, chunk in enumerate(chunks):
                 chunk_path = os.path.join(tmpdir, f"chunk_{i}.wav")
-                generate_audio_chunk(chunk, chunk_path)
-                audio_files.append(chunk_path)
+                if generate_speech(chunk, chunk_path):
+                    audio_files.append(chunk_path)
+                else:
+                    return jsonify({"error": "Error generando audio"}), 500
             
-            # Combinar fragmentos con pydub
-            combined_audio = AudioSegment.empty()
-            for audio_file in audio_files:
-                combined_audio += AudioSegment.from_wav(audio_file)
-            
+            if not audio_files:
+                return jsonify({"error": "No se generó audio"}), 500
+                
+            # Combinar audio
+            combined = AudioSegment.empty()
+            for f in audio_files:
+                combined += AudioSegment.from_wav(f)
+                
             output_path = os.path.join(tmpdir, "output.mp3")
-            combined_audio.export(output_path, format="mp3", bitrate="64k")
+            combined.export(output_path, format="mp3", bitrate="48k")  # Más bajo para Render
             
             return send_file(
                 output_path,
                 mimetype="audio/mpeg",
                 as_attachment=True,
-                download_name="sintesis.mp3"
+                download_name="speech.mp3"
             )
             
     except Exception as e:
-        app.logger.error(f"Error en el endpoint: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
-# ========= HEALTH CHECK ========= #
 @app.route("/health")
 def health_check():
     return jsonify({
-        "status": "ready" if tts_pipeline else "error",
+        "status": "ready" if model else "error",
         "model": MODEL_NAME,
-        "device": DEVICE,
-        "memory_optimized": True
+        "device": DEVICE
     })
 
-# ========= INICIO ========= #
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, threaded=True)
+    app.run(host="0.0.0.0", port=port)
