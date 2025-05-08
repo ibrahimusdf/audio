@@ -1,4 +1,6 @@
-Flask
-requests
+torch
+torchaudio
+flask
 python-dotenv
 pydub
+numpy
