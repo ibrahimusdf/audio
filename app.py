@@ -16,7 +16,7 @@ def tts():
         return jsonify({"error": "Texto vacío"}), 400
 
     try:
-        tts = gTTS(text, lang='en')  # Puedes cambiar 'en' por 'es' para español, 'fr' para francés, etc.
+        tts = gTTS(text, lang='es')  # Puedes cambiar 'en' por 'es' para español, 'fr' para francés, etc.
         
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as temp_audio:
             tts.save(temp_audio.name)
