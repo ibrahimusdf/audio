@@ -2,68 +2,111 @@ from flask import Flask, request, send_file, jsonify
 import os
 import tempfile
 import textwrap
-import requests
-import subprocess
 from dotenv import load_dotenv
+import torchaudio
+import torch
+from pydub import AudioSegment
 
 load_dotenv()
 
 app = Flask(__name__)
-ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
-VOICE_ID = "EXAVITQu4vr4xnSDxMaL"  # Puedes cambiarlo por otro si quieres
+
+# Configuration for Render's memory constraints
+DEVICE = "cpu"  # Force CPU-only to save memory
+MAX_CHUNK_SIZE = 300  # Smaller chunks to reduce memory usage
+
+# Initialize lightweight TTS (completely offline)
+try:
+    # Using torchaudio's built-in TTS (no HF token needed)
+    bundle = torchaudio.pipelines.TACOTRON2_WAVERNN_CHAR_LJSPEECH
+    processor = bundle.get_text_processor()
+    tacotron2 = bundle.get_tacotron2().to(DEVICE)
+    vocoder = bundle.get_vocoder().to(DEVICE)
+    
+    # Freeze models to reduce memory
+    tacotron2.eval()
+    vocoder.eval()
+    for param in tacotron2.parameters():
+        param.requires_grad = False
+    for param in vocoder.parameters():
+        param.requires_grad = False
+except Exception as e:
+    print(f"Error loading models: {e}")
+    processor = tacotron2 = vocoder = None
 
 def sintetizar_parte(texto, output_path):
-    url = f"https://api.elevenlabs.io/v1/text-to-speech/{VOICE_ID}"
-    headers = {
-        "xi-api-key": ELEVENLABS_API_KEY,
-        "Content-Type": "application/json"
-    }
-    data = {
-        "text": texto,
-        "voice_settings": {
-            "stability": 0.5,
-            "similarity_boost": 0.5
-        }
-    }
-
-    response = requests.post(url, json=data, headers=headers)
-    if response.status_code == 200:
-        with open(output_path, "wb") as f:
-            f.write(response.content)
-    else:
-        raise Exception(f"Error ElevenLabs: {response.status_code}, {response.text}")
+    if None in [processor, tacotron2, vocoder]:
+        raise Exception("TTS service unavailable")
+    
+    try:
+        with torch.no_grad():  # Disable gradient calculation
+            # Process text
+            processed, lengths = processor(texto)
+            processed = processed.to(DEVICE)
+            lengths = lengths.to(DEVICE)
+            
+            # Generate spectrogram
+            spec, _, _ = tacotron2.infer(processed, lengths)
+            
+            # Generate waveform
+            wave = vocoder(spec)
+            
+            # Save as WAV
+            torchaudio.save(output_path, wave, vocoder.sample_rate)
+            
+    except Exception as e:
+        raise Exception(f"TTS generation failed: {str(e)}")
 
 @app.route("/audio", methods=["POST"])
 def generar_audio():
-    texto = request.json.get("texto")
-    if not texto:
-        return jsonify({"error": "Falta el texto"}), 400
+    if None in [processor, tacotron2, vocoder]:
+        return jsonify({"error": "TTS service not ready"}), 503
+        
+    texto = request.json.get("texto", "")
+    if not texto.strip():
+        return jsonify({"error": "Text is required"}), 400
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        fragmentos = textwrap.wrap(texto, width=2500, break_long_words=False)
+        fragmentos = textwrap.wrap(texto, width=MAX_CHUNK_SIZE)
         partes = []
 
         for i, parte in enumerate(fragmentos):
-            out_path = os.path.join(tmpdir, f"parte_{i}.mp3")
-            sintetizar_parte(parte, out_path)
-            partes.append(out_path)
+            out_path = os.path.join(tmpdir, f"parte_{i}.wav")
+            try:
+                sintetizar_parte(parte, out_path)
+                partes.append(out_path)
+            except Exception as e:
+                return jsonify({"error": str(e)}), 500
 
-        lista_txt = os.path.join(tmpdir, "lista.txt")
-        with open(lista_txt, "w") as f:
-            for p in partes:
-                f.write(f"file '{p}'\n")
+        if not partes:
+            return jsonify({"error": "No audio generated"}), 500
 
-        audio_final = os.path.join(tmpdir, "audio_final.mp3")
+        # Combine with pydub
         try:
-            subprocess.run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", lista_txt, "-c", "copy", audio_final], check=True)
-        except subprocess.CalledProcessError as e:
-            return jsonify({"error": "Error al unir audios con ffmpeg", "details": str(e)}), 500
-
-        return send_file(audio_final, mimetype="audio/mpeg", as_attachment=True, download_name="audio_final.mp3")
+            combined = AudioSegment.empty()
+            for p in partes:
+                combined += AudioSegment.from_wav(p)
+            
+            output_path = os.path.join(tmpdir, "output.mp3")
+            combined.export(output_path, format="mp3", bitrate="64k")
+            
+            return send_file(
+                output_path,
+                mimetype="audio/mpeg",
+                as_attachment=True,
+                download_name="speech.mp3"
+            )
+        except Exception as e:
+            return jsonify({"error": f"Audio combining failed: {str(e)}"}), 500
 
 @app.route("/health")
 def health():
-    return jsonify({"status": "ok"})
+    status = {
+        "status": "ready" if all([processor, tacotron2, vocoder]) else "unavailable",
+        "device": DEVICE,
+        "memory": "optimized"
+    }
+    return jsonify(status)
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
