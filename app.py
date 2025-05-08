@@ -9,7 +9,7 @@ app = Flask(__name__)
 
 # ===== CONFIGURACIÓN =====
 MAX_CHUNK_SIZE = 200  # Ajustá según el límite de gTTS
-LANG = "en"  # Podés cambiarlo a "es" para español
+LANG = "es"  # Podés cambiarlo a "es" para español
 
 # ===== FUNCIÓN PRINCIPAL DE AUDIO =====
 def generar_audio_gtts(texto_completo, output_path):
