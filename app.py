@@ -3,63 +3,55 @@ import os
 import tempfile
 import textwrap
 from dotenv import load_dotenv
-import torchaudio
+from transformers import pipeline
 import torch
-from pydub import AudioSegment
 
 load_dotenv()
 
 app = Flask(__name__)
 
 # Configuration for Render's memory constraints
-DEVICE = "cpu"  # Force CPU-only to save memory
-MAX_CHUNK_SIZE = 300  # Smaller chunks to reduce memory usage
+MODEL_NAME = "espnet/kan-bayashi_ljspeech_joint_finetune_conformer_fastspeech2_hifigan"  # Smaller model
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+MAX_CHUNK_SIZE = 500  # Smaller chunks to reduce memory usage
 
-# Initialize lightweight TTS (completely offline)
+# Initialize with memory optimization
 try:
-    # Using torchaudio's built-in TTS (no HF token needed)
-    bundle = torchaudio.pipelines.TACOTRON2_WAVERNN_CHAR_LJSPEECH
-    processor = bundle.get_text_processor()
-    tacotron2 = bundle.get_tacotron2().to(DEVICE)
-    vocoder = bundle.get_vocoder().to(DEVICE)
-    
-    # Freeze models to reduce memory
-    tacotron2.eval()
-    vocoder.eval()
-    for param in tacotron2.parameters():
-        param.requires_grad = False
-    for param in vocoder.parameters():
+    tts_pipeline = pipeline(
+        "text-to-speech",
+        model=MODEL_NAME,
+        device=DEVICE,
+        torch_dtype=torch.float16 if DEVICE == "cuda" else torch.float32
+    )
+    # Freeze model to reduce memory
+    tts_pipeline.model.eval()
+    for param in tts_pipeline.model.parameters():
         param.requires_grad = False
 except Exception as e:
-    print(f"Error loading models: {e}")
-    processor = tacotron2 = vocoder = None
+    print(f"Error loading model: {e}")
+    tts_pipeline = None
 
 def sintetizar_parte(texto, output_path):
-    if None in [processor, tacotron2, vocoder]:
+    if tts_pipeline is None:
         raise Exception("TTS service unavailable")
     
     try:
-        with torch.no_grad():  # Disable gradient calculation
-            # Process text
-            processed, lengths = processor(texto)
-            processed = processed.to(DEVICE)
-            lengths = lengths.to(DEVICE)
+        # Clear CUDA cache if using GPU
+        if DEVICE == "cuda":
+            torch.cuda.empty_cache()
             
-            # Generate spectrogram
-            spec, _, _ = tacotron2.infer(processed, lengths)
-            
-            # Generate waveform
-            wave = vocoder(spec)
-            
-            # Save as WAV
-            torchaudio.save(output_path, wave, vocoder.sample_rate)
-            
+        speech_output = tts_pipeline(texto)
+        
+        # Use scipy to save as WAV (lighter than soundfile)
+        from scipy.io.wavfile import write
+        write(output_path, speech_output["sampling_rate"], speech_output["audio"])
+        
     except Exception as e:
         raise Exception(f"TTS generation failed: {str(e)}")
 
 @app.route("/audio", methods=["POST"])
 def generar_audio():
-    if None in [processor, tacotron2, vocoder]:
+    if tts_pipeline is None:
         return jsonify({"error": "TTS service not ready"}), 503
         
     texto = request.json.get("texto", "")
@@ -81,14 +73,15 @@ def generar_audio():
         if not partes:
             return jsonify({"error": "No audio generated"}), 500
 
-        # Combine with pydub
+        # Combine with pydub (lighter than ffmpeg)
         try:
+            from pydub import AudioSegment
             combined = AudioSegment.empty()
             for p in partes:
                 combined += AudioSegment.from_wav(p)
             
             output_path = os.path.join(tmpdir, "output.mp3")
-            combined.export(output_path, format="mp3", bitrate="64k")
+            combined.export(output_path, format="mp3", bitrate="64k")  # Lower quality to save memory
             
             return send_file(
                 output_path,
@@ -102,8 +95,9 @@ def generar_audio():
 @app.route("/health")
 def health():
     status = {
-        "status": "ready" if all([processor, tacotron2, vocoder]) else "unavailable",
+        "status": "ready" if tts_pipeline else "unavailable",
         "device": DEVICE,
+        "model": MODEL_NAME,
         "memory": "optimized"
     }
     return jsonify(status)
