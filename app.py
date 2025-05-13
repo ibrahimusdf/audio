@@ -1,56 +1,87 @@
-from flask import Flask, request, send_file, jsonify
-from gtts import gTTS
-from pydub import AudioSegment
 import os
-import tempfile
-import textwrap
+import requests
+import yt_dlp
+from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
-# ===== CONFIGURACIÓN =====
-MAX_CHUNK_SIZE = 200  # Ajustá según el límite de gTTS
-LANG = "es"  # Podés cambiarlo a "es" para español
+ASSEMBLYAI_API_KEY = os.environ.get("ASSEMBLYAI_API_KEY")
+HEADERS = {"authorization": ASSEMBLYAI_API_KEY}
 
-# ===== FUNCIÓN PRINCIPAL DE AUDIO =====
-def generar_audio_gtts(texto_completo, output_path):
-    chunks = textwrap.wrap(texto_completo, width=MAX_CHUNK_SIZE)
-    combined = AudioSegment.empty()
+# 1. Descargar audio de YouTube
+def descargar_audio(url, filename="audio.mp3"):
+    ydl_opts = {
+        "format": "bestaudio/best",
+        "extract_audio": True,
+        "audio_format": "mp3",
+        "outtmpl": filename,
+    }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        ydl.download([url])
+    return filename
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        for i, chunk in enumerate(chunks):
-            tts = gTTS(chunk, lang=LANG)
-            temp_file = os.path.join(tmpdir, f"chunk_{i}.mp3")
-            tts.save(temp_file)
-            combined += AudioSegment.from_mp3(temp_file)
+# 2. Subir audio a AssemblyAI
+def subir_audio(filepath):
+    with open(filepath, "rb") as f:
+        response = requests.post(
+            "https://api.assemblyai.com/v2/upload",
+            headers=HEADERS,
+            data=f
+        )
+    response.raise_for_status()
+    return response.json()["upload_url"]
 
-        combined.export(output_path, format="mp3")
+# 3. Enviar a transcripción
+def enviar_a_transcribir(audio_url):
+    json = { "audio_url": audio_url }
+    response = requests.post(
+        "https://api.assemblyai.com/v2/transcript",
+        json=json,
+        headers=HEADERS
+    )
+    response.raise_for_status()
+    return response.json()["id"]
 
-# ===== ENDPOINT PRINCIPAL =====
-@app.route("/tts", methods=["POST"])
-def tts_endpoint():
-    data = request.get_json()
-    if not data or "text" not in data:
-        return jsonify({"error": "Se requiere el campo 'text'"}), 400
+# 4. Verificar transcripción
+def obtener_transcripcion(transcript_id):
+    url = f"https://api.assemblyai.com/v2/transcript/{transcript_id}"
+    while True:
+        response = requests.get(url, headers=HEADERS)
+        result = response.json()
+        if result["status"] == "completed":
+            return result["text"]
+        elif result["status"] == "error":
+            raise Exception("Error en transcripción: " + result["error"])
 
-    texto = data["text"]
+# === RUTA PRINCIPAL ===
+@app.route("/transcribir", methods=["POST"])
+def transcribir():
+    data = request.json
+    video_url = data.get("url")
 
-    try:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            output_path = os.path.join(tmpdir, "output.mp3")
-            generar_audio_gtts(texto, output_path)
-            return send_file(
-                output_path,
-                mimetype="audio/mpeg",
-                as_attachment=True,
-                download_name="speech.mp3"
-            )
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    if not video_url:
+        return jsonify({"error": "Falta el campo 'url'"}), 400
 
-# ===== HEALTH CHECK =====
-@app.route("/health", methods=["GET"])
+    print("🔊 Descargando audio...")
+    audio_path = descargar_audio(video_url)
+
+    print("📤 Subiendo a AssemblyAI...")
+    upload_url = subir_audio(audio_path)
+
+    print("📝 Enviando a transcripción...")
+    transcript_id = enviar_a_transcribir(upload_url)
+
+    print("⏳ Esperando transcripción...")
+    texto = obtener_transcripcion(transcript_id)
+
+    os.remove(audio_path)  # limpiar
+    return jsonify({"transcripcion": texto})
+
+@app.route("/health")
 def health():
-    return jsonify({"status": "ok", "engine": "gTTS", "language": LANG})
+    return jsonify({"status": "ok"})
+
+  app.run(debug=True)
 
 # ===== MAIN =====
 if __name__ == "__main__":
