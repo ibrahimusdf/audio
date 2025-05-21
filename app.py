@@ -53,6 +53,7 @@ def obtener_transcripcion(transcript_id):
         elif result["status"] == "error":
             raise Exception("Error en transcripción: " + result["error"])
 
+
 # === RUTA PRINCIPAL ===
 @app.route("/transcribir", methods=["POST"])
 def transcribir():
